@@ -1,0 +1,3 @@
+C:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa/build/CMakeFiles/noaa_apt.dir
+C:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa/build/CMakeFiles/ZERO_CHECK.dir
