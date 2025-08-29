@@ -116,19 +116,15 @@ int main(int argc, char** argv){
     if (maxv>0) for (auto& v: y) v /= maxv;
 
     // --- Band-pass ~1.5–3.5 kHz using two cascaded biquads centered at 2.4 kHz ---
-    Biquad bp1 = Biquad::bandpass(fs, 2400.0, 1.0);
-    Biquad bp2 = Biquad::bandpass(fs, 2400.0, 2.0);
+    Biquad bp = Biquad::bandpass(fs, 2400.0, 1.5); // gentler
     std::vector<float> yb = y;
-    for (auto& s: yb) { s = bp1.process(s); }
-    bp1.reset();
-    for (auto& s: yb) { s = bp2.process(s); }
-    bp2.reset();
-    // Zero-phase (light) to smooth response
-    filtfilt(yb, Biquad::lowpass(fs, 6000.0));
+    for (auto& s: yb) s = bp.process(s);
+    bp.reset();
+    filtfilt(yb, Biquad::lowpass(fs, 4500.0));     // touch of smoothing pre-envelope
 
     // --- Envelope via rectifier + low-pass ---
     for (auto& s: yb) s = std::abs(s);
-    filtfilt(yb, Biquad::lowpass(fs, 5000.0)); // smooth video
+    filtfilt(yb, Biquad::lowpass(fs, 2500.0)); // smooth video
 
     // --- Sync detection (Goertzel on sliding windows) ---
     const double f1 = 1040.0, f2 = 832.0; // NOAA APT sync tones
@@ -201,6 +197,22 @@ int main(int argc, char** argv){
         float hi = tmp[tmp.size()*99/100];
         if (hi <= lo) continue;
         for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
+
+        // Row-mean normalization to remove horizontal bands
+        double mean = 0.0;
+        for (auto v : segline) mean += v;
+        mean /= std::max<size_t>(1, segline.size());
+
+        static std::vector<double> recentMeans;
+        recentMeans.push_back(mean);
+        size_t Wm = 51; // window of ~51 lines
+        if (recentMeans.size() > Wm) recentMeans.erase(recentMeans.begin());
+        std::vector<double> sorted = recentMeans;
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size()/2, sorted.end());
+        double targetMed = sorted[sorted.size()/2];
+        double gainMed = (mean > 1e-6) ? (targetMed / mean) : 1.0;
+        for (auto& v : segline) v = std::clamp(float(v * gainMed), 0.0f, 1.0f);
+
 
         auto line = resample_line(segline, W);
         std::vector<uint8_t> row(W);
