@@ -1,3 +1,4 @@
+
 #include <sndfile.hh>
 #include <vector>
 #include <cmath>
@@ -7,7 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <complex>
-#include <fftw3.h>             
+#include <fftw3.h>             // <-- FFTW3
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -230,51 +231,4 @@ int main(int argc, char** argv){
     for (size_t i=0;i<peaks.size();++i){
         if (i==0 || (peaks[i]-peaks[i-1]) > int(0.20*fs_d)) line_starts.push_back(peaks[i]);
     }
-    if (line_starts.size() < 10) { std::cerr << "Too few line starts.\n"; return 1; }
-
-    std::vector<std::vector<uint8_t>> rows;
-    rows.reserve(line_starts.size());
-    for (size_t i=0;i+1<line_starts.size();++i){
-        int s0 = line_starts[i];
-        int s1 = line_starts[i+1];
-        if (s1 <= s0 + int(0.2*fs_d)) continue;
-        std::vector<float> segline(env.begin()+s0, env.begin()+s1);
-
-        std::vector<float> tmp = segline;
-        std::nth_element(tmp.begin(), tmp.begin()+ (int)tmp.size()/100, tmp.end());
-        float lo = tmp[(int)tmp.size()/100];
-        std::nth_element(tmp.begin(), tmp.begin()+ (int)tmp.size()*99/100, tmp.end());
-        float hi = tmp[(int)tmp.size()*99/100];
-        if (hi <= lo) continue;
-        for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
-
-        double mean = 0.0;
-        for (auto v : segline) mean += v;
-        mean /= std::max<size_t>(1, segline.size());
-        static std::vector<double> recentMeans;
-        recentMeans.push_back(mean);
-        size_t Wm = 101;
-        if (recentMeans.size() > Wm) recentMeans.erase(recentMeans.begin());
-        std::vector<double> sorted = recentMeans;
-        std::nth_element(sorted.begin(), sorted.begin() + (int)sorted.size()/2, sorted.end());
-        double targetMed = sorted[(int)sorted.size()/2];
-        double gainMed = (mean > 1e-6) ? (targetMed / mean) : 1.0;
-        gainMed = std::clamp(gainMed, 0.7, 1.4);
-        for (auto& v : segline) v = std::clamp(float(v * gainMed), 0.0f, 1.0f);
-
-        auto line = resample_line(segline, W);
-        std::vector<uint8_t> row(W);
-        for (int j=0;j<W;++j) row[j] = (uint8_t)std::lround(std::clamp(line[j]*255.0f, 0.0f, 255.0f));
-        rows.push_back(std::move(row));
-    }
-
-    int H = (int)rows.size();
-    std::vector<uint8_t> img(H*W);
-    for (int r=0;r<H;++r) std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
-
-    if (!stbi_write_png(outpng.c_str(), W, H, 1, img.data(), W)) {
-        std::cerr << "Failed to write PNG\n"; return 1;
-    }
-    std::cerr << "Saved " << outpng << " (" << H << "x" << W << ")\n";
-    return 0;
-}
+    if (line_starts.size() < 10) { std::cerr << "Too fe_
