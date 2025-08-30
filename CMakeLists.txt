@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 find_package(SndFile REQUIRED)
 find_package(FFTW3 REQUIRED)                # provides FFTW3::fftw3
 find_package(SampleRate CONFIG REQUIRED)    # provides SampleRate::samplerate
+find_package(OpenCV REQUIRED)
 
 add_executable(noaa_apt noaa_apt.cpp)
 target_link_libraries(noaa_apt
@@ -17,3 +18,5 @@ target_link_libraries(noaa_apt
 
 # for stb_image_write.h in source dir
 target_include_directories(noaa_apt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+target_link_libraries(noaa_apt PRIVATE ${OpenCV_LIBS})

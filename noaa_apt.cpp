@@ -7,8 +7,12 @@
 #include <cstdint>
 #include <string>
 #include <complex>
-#include <fftw3.h>  
-#include <samplerate.h>                   
+#include <fftw3.h>
+#include <samplerate.h>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/photo.hpp>
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -51,12 +55,14 @@ struct Biquad {
     }
 };
 
+// Zero-phase filter by forward/backward pass
 static void filtfilt(std::vector<float>& x, Biquad biq) {
     for (auto& s : x) s = biq.process(s);
     biq.reset();
     for (int i=(int)x.size()-1; i>=0; --i) x[i] = biq.process(x[i]);
 }
 
+// Goertzel (power at a single frequency)
 static double goertzel_power(const float* x, int N, double fs, double f) {
     int k = int(0.5 + (N * f) / fs);
     double w = (2.0 * M_PI / N) * k;
@@ -70,8 +76,9 @@ static double goertzel_power(const float* x, int N, double fs, double f) {
     return power;
 }
 
+// Linear resample to fixed length
 static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
-    std::vector<float> out(W);
+    std::vector<float> out(W, 0.f);
     if (seg.size() < 2) return out;
     double scale = double(seg.size()-1) / (W-1);
     for (int i=0;i<W;++i) {
@@ -88,35 +95,29 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     int N = (int)x.size();
     std::vector<std::complex<double>> X(N);
 
-    // Allocate FFTW arrays
     fftw_complex* in  = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
     fftw_complex* out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
 
-    // Copy input
     for (int i=0;i<N;i++) { in[i][0] = x[i]; in[i][1] = 0.0; }
 
-    // Forward FFT
     fftw_plan fwd = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
     fftw_execute(fwd);
 
-    // Apply Hilbert transform in frequency domain
     for (int k=0; k<N; k++) {
         std::complex<double> val(out[k][0], out[k][1]);
         if (k == 0 || (N%2==0 && k==N/2)) {
-            X[k] = val; // keep DC and Nyquist as is
+            X[k] = val; // keep DC and Nyquist
         } else if (k < N/2) {
-            X[k] = 2.0*val; // double positive freqs
+            X[k] = 2.0*val; // positive freqs
         } else {
-            X[k] = 0.0;     // zero negative freqs
+            X[k] = 0.0;     // negative freqs
         }
     }
 
-    // Inverse FFT
     for (int i=0;i<N;i++) { in[i][0] = X[i].real(); in[i][1] = X[i].imag(); }
     fftw_plan inv = fftw_plan_dft_1d(N, in, out, FFTW_BACKWARD, FFTW_ESTIMATE);
     fftw_execute(inv);
 
-    // Envelope = magnitude of analytic signal
     std::vector<float> env(N);
     for (int i=0;i<N;i++) {
         double re = out[i][0]/N;
@@ -132,7 +133,7 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     return env;
 }
 
-// --- Multi-level Haar wavelet denoising ---
+// --- Multi-level Haar wavelet denoising (for "manual" mode) ---
 static void haar_dwt(std::vector<double>& data, int levels) {
     int n = (int)data.size();
     for (int lev=0; lev<levels; lev++) {
@@ -171,10 +172,8 @@ static std::vector<uint8_t> haar_denoise_multi(const std::vector<uint8_t>& row, 
     int n = (int)row.size();
     std::vector<double> data(row.begin(), row.end());
 
-    // Forward DWT
     haar_dwt(data, levels);
 
-    // Threshold detail coefficients at each level
     int offset = 0;
     for (int lev=0; lev<levels; lev++) {
         int step = n >> lev;
@@ -183,14 +182,12 @@ static std::vector<uint8_t> haar_denoise_multi(const std::vector<uint8_t>& row, 
         for (int i=0; i<half; i++) {
             double& d = data[offset + i];
             if (std::abs(d) < thresh) d = 0;
-            else d = (d > 0 ? d-thresh : d+thresh);
+            else d = (d > 0 ? d-thresh : d+thresh); // soft threshold
         }
     }
 
-    // Inverse DWT
     haar_idwt(data, levels);
 
-    // Clamp back to [0,255]
     std::vector<uint8_t> out(n);
     for (int i=0; i<n; i++) {
         out[i] = (uint8_t)std::clamp(std::round(data[i]), 0.0, 255.0);
@@ -198,18 +195,19 @@ static std::vector<uint8_t> haar_denoise_multi(const std::vector<uint8_t>& row, 
     return out;
 }
 
-
-
 // ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200]\n";
+        std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200] [mode]\n";
+        std::cerr << "Modes: manual (haar+hist) | opencv (clahe+nlm)\n";
         return 1;
     }
     std::string inpath = argv[1];
     std::string outpng = argv[2];
     int W = (argc>=4)? std::max(200, std::atoi(argv[3])) : 1200;
+    std::string mode = (argc>=5)? std::string(argv[4]) : std::string("opencv"); // default
 
+    // --- Read WAV (libsndfile) ---
     SndfileHandle snd(inpath);
     if (snd.error()) { std::cerr << "libsndfile error\n"; return 1; }
     int fs = snd.samplerate();
@@ -223,10 +221,12 @@ int main(int argc, char** argv){
     if (ch==1) y = std::move(buf);
     else for (sf_count_t i=0;i<N;++i) y[i] = buf[i*ch + 0];
 
+    // normalize
     float maxv = 0.f;
     for (auto v: y) maxv = std::max(maxv, std::abs(v));
     if (maxv>0) for (auto& v: y) v /= maxv;
 
+    // --- Band-limit around subcarrier (~2.4 kHz) ---
     Biquad bp = Biquad::bandpass(fs, 2400.0, 1.5);
     std::vector<float> yb = y;
     for (auto& s: yb) s = bp.process(s);
@@ -254,11 +254,11 @@ int main(int argc, char** argv){
     }
     yd.resize(src_data.output_frames_gen);
 
-    // Envelope with Hilbert FFT
+    // --- Envelope with Hilbert FFT ---
     std::vector<float> env = hilbert_envelope_fft(yd);
     filtfilt(env, Biquad::lowpass(fs_d, 3000.0));
 
-    // DC-block
+    // --- DC-block ---
     {
         float px = 0.f, py = 0.f;
         const float r = 0.995f;
@@ -269,7 +269,7 @@ int main(int argc, char** argv){
         }
     }
 
-    // --- Sync detection etc (unchanged) ---
+    // --- Sync detection (Goertzel on sliding windows) ---
     const double f1 = 1040.0, f2 = 832.0;
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs_d*win_ms/1000);
@@ -310,14 +310,17 @@ int main(int argc, char** argv){
     }
     if (line_starts.size() < 10) { std::cerr << "Too few line starts.\n"; return 1; }
 
+    // --- Assemble image rows with per-line normalization ---
     std::vector<std::vector<uint8_t>> rows;
     rows.reserve(line_starts.size());
+    static std::vector<double> recentMeans; // for running-median AGC
     for (size_t i=0;i+1<line_starts.size();++i){
         int s0 = line_starts[i];
         int s1 = line_starts[i+1];
         if (s1 <= s0 + int(0.2*fs_d)) continue;
         std::vector<float> segline(env.begin()+s0, env.begin()+s1);
 
+        // percentile clip (1–99%)
         std::vector<float> tmp = segline;
         std::nth_element(tmp.begin(), tmp.begin()+ (int)tmp.size()/100, tmp.end());
         float lo = tmp[(int)tmp.size()/100];
@@ -326,10 +329,10 @@ int main(int argc, char** argv){
         if (hi <= lo) continue;
         for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
 
+        // running-median per-row normalization
         double mean = 0.0;
         for (auto v : segline) mean += v;
         mean /= std::max<size_t>(1, segline.size());
-        static std::vector<double> recentMeans;
         recentMeans.push_back(mean);
         size_t Wm = 101;
         if (recentMeans.size() > Wm) recentMeans.erase(recentMeans.begin());
@@ -344,24 +347,31 @@ int main(int argc, char** argv){
         std::vector<uint8_t> row(W);
         for (int j=0;j<W;++j) row[j] = (uint8_t)std::lround(std::clamp(line[j]*255.0f, 0.0f, 255.0f));
 
-        //rows.push_back(std::move(row));
-        // Apply multi-level Haar denoising
-        auto denoisedRow = haar_denoise_multi(row, 3, 15.0); // levels=3, threshold=8
-        rows.push_back(std::move(denoisedRow));
-
+        rows.push_back(std::move(row));
     }
+    if (rows.empty()) { std::cerr << "No rows assembled.\n"; return 1; }
 
-    int H = (int)rows.size();
-    std::vector<uint8_t> img(H*W);
-    for (int r=0;r<H;++r) std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
+    const int H = (int)rows.size();
 
-        // --- Global histogram equalization for contrast enhancement ---
-    {
+    // --------- BRANCH: manual vs OpenCV ----------
+    std::vector<uint8_t> outBuf;
+
+    if (mode == "manual") {
+        // Haar denoise each row
+        for (auto& row : rows) {
+            row = haar_denoise_multi(row, 3, 15.0); // levels, threshold
+        }
+
+        // Flatten rows to single buffer
+        std::vector<uint8_t> img(H*W);
+        for (int r=0;r<H;++r)
+            std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
+
+        // Global histogram equalization
         const int levels = 256;
         std::vector<int> hist(levels, 0);
         for (auto v : img) hist[v]++;
 
-        // Compute CDF
         std::vector<int> cdf(levels, 0);
         cdf[0] = hist[0];
         for (int i=1;i<levels;i++) cdf[i] = cdf[i-1] + hist[i];
@@ -370,19 +380,38 @@ int main(int argc, char** argv){
         int cdf_min = 0;
         for (int i=0;i<levels;i++) { if (cdf[i] != 0) { cdf_min = cdf[i]; break; } }
 
-        // Map through equalization LUT
         std::vector<uint8_t> lut(levels);
         for (int i=0;i<levels;i++) {
-            lut[i] = (uint8_t)std::round(((double)(cdf[i] - cdf_min) / (total - cdf_min)) * 255.0);
+            lut[i] = (uint8_t)std::round(((double)(cdf[i] - cdf_min) / (std::max(1, total - cdf_min))) * 255.0);
         }
-
         for (auto& v : img) v = lut[v];
+
+        outBuf = std::move(img);
+    } else {
+        // OpenCV CLAHE + NLM
+        std::vector<uint8_t> img(H*W);
+        for (int r=0;r<H;++r)
+            std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
+
+        cv::Mat imgMat(H, W, CV_8UC1, img.data());
+
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
+        clahe->setClipLimit(2.0);                // try 2.0–4.0
+        clahe->setTilesGridSize(cv::Size(8, 8)); // local tiles
+        cv::Mat imgClahe;
+        clahe->apply(imgMat, imgClahe);
+
+        cv::Mat imgDenoised;
+        cv::fastNlMeansDenoising(imgClahe, imgDenoised, 10, 7, 21);
+        // params: h=10, templateWindow=7, searchWindow=21
+
+        outBuf.assign(imgDenoised.begin<uint8_t>(), imgDenoised.end<uint8_t>());
     }
 
-
-    if (!stbi_write_png(outpng.c_str(), W, H, 1, img.data(), W)) {
+    // --- Write PNG ---
+    if (!stbi_write_png(outpng.c_str(), W, H, 1, outBuf.data(), W)) {
         std::cerr << "Failed to write PNG\n"; return 1;
     }
-    std::cerr << "Saved " << outpng << " (" << H << "x" << W << ")\n";
+    std::cerr << "Saved " << outpng << " (" << H << "x" << W << ") using mode=" << mode << "\n";
     return 0;
 }
