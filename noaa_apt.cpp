@@ -195,17 +195,46 @@ static std::vector<uint8_t> haar_denoise_multi(const std::vector<uint8_t>& row, 
     return out;
 }
 
+// ---- Colormap name -> OpenCV enum (returns -1 for gray) ----
+static int map_colormap(const std::string& name) {
+    std::string s = name;
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+    if (s=="gray" || s=="greyscale" || s=="grayscale" || s=="none") return -1;
+    if (s=="jet")      return cv::COLORMAP_JET;
+    if (s=="ocean")    return cv::COLORMAP_OCEAN;
+    //if (s=="terrain")  return cv::COLORMAP_TERRAIN;
+    if (s=="hot")      return cv::COLORMAP_HOT;
+    if (s=="bone")     return cv::COLORMAP_BONE;
+    if (s=="winter")   return cv::COLORMAP_WINTER;
+    if (s=="rainbow")  return cv::COLORMAP_RAINBOW;
+    if (s=="autumn")   return cv::COLORMAP_AUTUMN;
+    if (s=="summer")   return cv::COLORMAP_SUMMER;
+    if (s=="spring")   return cv::COLORMAP_SPRING;
+    if (s=="cool")     return cv::COLORMAP_COOL;
+    if (s=="hsv")      return cv::COLORMAP_HSV;
+    if (s=="pink")     return cv::COLORMAP_PINK;
+    if (s=="parula")   return cv::COLORMAP_PARULA;
+#ifdef CV_COLORMAP_TURBO
+    if (s=="turbo")    return cv::COLORMAP_TURBO;
+#else
+    if (s=="turbo")    return cv::COLORMAP_JET; // fallback
+#endif
+    return -1; // default to gray if unknown
+}
+
 // ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200] [mode]\n";
-        std::cerr << "Modes: manual (haar+hist) | opencv (clahe+nlm)\n";
+        std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200] [mode] [color]\n";
+        std::cerr << "Modes: opencv (default) | manual\n";
+        std::cerr << "Color: gray (default) | jet | ocean | terrain | hot | bone | winter | rainbow | autumn | summer | spring | cool | hsv | pink | parula | turbo\n";
         return 1;
     }
     std::string inpath = argv[1];
     std::string outpng = argv[2];
     int W = (argc>=4)? std::max(200, std::atoi(argv[3])) : 1200;
-    std::string mode = (argc>=5)? std::string(argv[4]) : std::string("opencv"); // default
+    std::string mode  = (argc>=5)? std::string(argv[4]) : std::string("opencv"); // default
+    std::string color = (argc>=6)? std::string(argv[5]) : std::string("gray");   // default
 
     // --- Read WAV (libsndfile) ---
     SndfileHandle snd(inpath);
@@ -354,64 +383,80 @@ int main(int argc, char** argv){
     const int H = (int)rows.size();
 
     // --------- BRANCH: manual vs OpenCV ----------
-    std::vector<uint8_t> outBuf;
-
+    std::vector<uint8_t> grayBuf; // final grayscale before optional color
     if (mode == "manual") {
         // Haar denoise each row
         for (auto& row : rows) {
             row = haar_denoise_multi(row, 3, 15.0); // levels, threshold
         }
-
-        // Flatten rows to single buffer
-        std::vector<uint8_t> img(H*W);
+        grayBuf.resize(H*W);
         for (int r=0;r<H;++r)
-            std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
+            std::copy(rows[r].begin(), rows[r].end(), grayBuf.begin()+r*W);
 
         // Global histogram equalization
         const int levels = 256;
         std::vector<int> hist(levels, 0);
-        for (auto v : img) hist[v]++;
-
+        for (auto v : grayBuf) hist[v]++;
         std::vector<int> cdf(levels, 0);
         cdf[0] = hist[0];
         for (int i=1;i<levels;i++) cdf[i] = cdf[i-1] + hist[i];
-
         int total = H * W;
         int cdf_min = 0;
         for (int i=0;i<levels;i++) { if (cdf[i] != 0) { cdf_min = cdf[i]; break; } }
-
         std::vector<uint8_t> lut(levels);
         for (int i=0;i<levels;i++) {
             lut[i] = (uint8_t)std::round(((double)(cdf[i] - cdf_min) / (std::max(1, total - cdf_min))) * 255.0);
         }
-        for (auto& v : img) v = lut[v];
+        for (auto& v : grayBuf) v = lut[v];
 
-        outBuf = std::move(img);
     } else {
         // OpenCV CLAHE + NLM
-        std::vector<uint8_t> img(H*W);
+        grayBuf.resize(H*W);
         for (int r=0;r<H;++r)
-            std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
+            std::copy(rows[r].begin(), rows[r].end(), grayBuf.begin()+r*W);
 
-        cv::Mat imgMat(H, W, CV_8UC1, img.data());
-
+        cv::Mat imgMat(H, W, CV_8UC1, grayBuf.data());
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
-        clahe->setClipLimit(2.0);                // try 2.0–4.0
-        clahe->setTilesGridSize(cv::Size(8, 8)); // local tiles
+        clahe->setClipLimit(2.0);
+        clahe->setTilesGridSize(cv::Size(8, 8));
         cv::Mat imgClahe;
         clahe->apply(imgMat, imgClahe);
 
         cv::Mat imgDenoised;
         cv::fastNlMeansDenoising(imgClahe, imgDenoised, 10, 7, 21);
-        // params: h=10, templateWindow=7, searchWindow=21
 
-        outBuf.assign(imgDenoised.begin<uint8_t>(), imgDenoised.end<uint8_t>());
+        // overwrite grayBuf with denoised result
+        grayBuf.assign(imgDenoised.begin<uint8_t>(), imgDenoised.end<uint8_t>());
     }
 
-    // --- Write PNG ---
-    if (!stbi_write_png(outpng.c_str(), W, H, 1, outBuf.data(), W)) {
+    // --------- Optional color mapping with OpenCV ---------
+int cmap = map_colormap(color);
+if (cmap < 0) {
+    // Gray output
+    if (!stbi_write_png(outpng.c_str(), W, H, 1, grayBuf.data(), W)) {
         std::cerr << "Failed to write PNG\n"; return 1;
     }
-    std::cerr << "Saved " << outpng << " (" << H << "x" << W << ") using mode=" << mode << "\n";
+    std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") mode=" << mode << " color=gray\n";
+} else {
+    cv::Mat grayMat(H, W, CV_8UC1, grayBuf.data());
+    if (!grayMat.isContinuous()) grayMat = grayMat.clone(); // ensure contiguous
+
+    cv::Mat bgr;
+    cv::applyColorMap(grayMat, bgr, cmap);         // BGR, CV_8UC3
+    if (!bgr.data) { std::cerr << "applyColorMap produced empty image\n"; return 1; }
+
+    cv::Mat rgb;
+    cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);     // RGB for stbi
+    if (!rgb.isContinuous()) rgb = rgb.clone();    // ensure contiguous
+
+    // Use Mat's stride (bytes per row). stb expects row stride in bytes.
+    int stride = static_cast<int>(rgb.step);
+    if (!stbi_write_png(outpng.c_str(), W, H, 3, rgb.data, stride)) {
+        std::cerr << "Failed to write PNG (color)\n"; return 1;
+    }
+    std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") mode=" << mode << " color=" << color << "\n";
+}
+
+
     return 0;
 }
