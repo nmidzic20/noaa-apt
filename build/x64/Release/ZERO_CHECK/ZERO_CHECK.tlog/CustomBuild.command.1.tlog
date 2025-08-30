@@ -1,6 +1,6 @@
 ^C:\USERS\KORISNIK\FOI\DIPLOMSKI\SOFTWARE\CMAKE\DEV\NOAA\BUILD\CMAKEFILES\F33842DC301359BD6C5A0566EF011097\GENERATE.STAMP.RULE
 setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa -BC:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa/build/noaa_apt_cpp.sln
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa -BC:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/Korisnik/FOI/Diplomski/software/cmake/dev/noaa/build/noaa_apt.sln
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

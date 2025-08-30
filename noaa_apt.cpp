@@ -7,7 +7,8 @@
 #include <cstdint>
 #include <string>
 #include <complex>
-#include <fftw3.h>             
+#include <fftw3.h>  
+#include <samplerate.h>                   
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -80,13 +81,6 @@ static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
         out[i] = (float)((1.0-frac)*seg[i0] + frac*seg[i0+1]);
     }
     return out;
-}
-
-static std::vector<float> decimate(const std::vector<float>& x, int M) {
-    std::vector<float> y;
-    y.reserve(x.size()/M + 1);
-    for (size_t i=0; i<x.size(); i += M) y.push_back(x[i]);
-    return y;
 }
 
 // ------------------ Hilbert FFT envelope ------------------
@@ -171,10 +165,26 @@ int main(int argc, char** argv){
     bp.reset();
     filtfilt(yb, Biquad::lowpass(fs, 4500.0));
 
+    // --- High-quality resampling using libsamplerate ---
     const int DEC = 4;
-    filtfilt(yb, Biquad::lowpass(fs, fs/(2.0*DEC) * 0.9));
-    std::vector<float> yd = decimate(yb, DEC);
     int fs_d = fs / DEC;
+    double ratio = 1.0 / DEC;
+    std::vector<float> yd(yb.size() / DEC + 100);
+
+    SRC_DATA src_data;
+    src_data.data_in = yb.data();
+    src_data.input_frames = (long)yb.size();
+    src_data.data_out = yd.data();
+    src_data.output_frames = (long)yd.size();
+    src_data.src_ratio = ratio;
+    src_data.end_of_input = 1;
+
+    int err = src_simple(&src_data, SRC_SINC_BEST_QUALITY, 1);
+    if (err) {
+        std::cerr << "libsamplerate error: " << src_strerror(err) << "\n";
+        return 1;
+    }
+    yd.resize(src_data.output_frames_gen);
 
     // Envelope with Hilbert FFT
     std::vector<float> env = hilbert_envelope_fft(yd);

@@ -26,3 +26,12 @@ find_package(FFTW3 REQUIRED)
 target_link_libraries(noaa_apt PRIVATE SndFile::sndfile FFTW3::fftw3)
 
 Then configure cmake again before building (commands at the top).
+
+For samplerate.h (Better sampling):
+
+.\vcpkg install libsamplerate:x64-windows
+
+Add to CMakeLists.txt:
+
+find_package(Samplerate REQUIRED)
+target_link_libraries(noaa_apt PRIVATE Samplerate::samplerate)
