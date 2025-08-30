@@ -132,6 +132,74 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     return env;
 }
 
+// --- Multi-level Haar wavelet denoising ---
+static void haar_dwt(std::vector<double>& data, int levels) {
+    int n = (int)data.size();
+    for (int lev=0; lev<levels; lev++) {
+        int step = n >> lev;
+        if (step < 2) break;
+        std::vector<double> approx(step/2), detail(step/2);
+        for (int i=0; i<step/2; i++) {
+            approx[i] = (data[2*i] + data[2*i+1]) / 2.0;
+            detail[i] = (data[2*i] - data[2*i+1]) / 2.0;
+        }
+        for (int i=0; i<step/2; i++) {
+            data[i] = approx[i];
+            data[step/2 + i] = detail[i];
+        }
+    }
+}
+
+static void haar_idwt(std::vector<double>& data, int levels) {
+    int n = (int)data.size();
+    for (int lev=levels-1; lev>=0; lev--) {
+        int step = n >> lev;
+        if (step < 2) continue;
+        std::vector<double> approx(step/2), detail(step/2);
+        for (int i=0; i<step/2; i++) {
+            approx[i] = data[i];
+            detail[i] = data[step/2 + i];
+        }
+        for (int i=0; i<step/2; i++) {
+            data[2*i]   = approx[i] + detail[i];
+            data[2*i+1] = approx[i] - detail[i];
+        }
+    }
+}
+
+static std::vector<uint8_t> haar_denoise_multi(const std::vector<uint8_t>& row, int levels, double thresh) {
+    int n = (int)row.size();
+    std::vector<double> data(row.begin(), row.end());
+
+    // Forward DWT
+    haar_dwt(data, levels);
+
+    // Threshold detail coefficients at each level
+    int offset = 0;
+    for (int lev=0; lev<levels; lev++) {
+        int step = n >> lev;
+        int half = step/2;
+        offset += half; // details start here
+        for (int i=0; i<half; i++) {
+            double& d = data[offset + i];
+            if (std::abs(d) < thresh) d = 0;
+            else d = (d > 0 ? d-thresh : d+thresh);
+        }
+    }
+
+    // Inverse DWT
+    haar_idwt(data, levels);
+
+    // Clamp back to [0,255]
+    std::vector<uint8_t> out(n);
+    for (int i=0; i<n; i++) {
+        out[i] = (uint8_t)std::clamp(std::round(data[i]), 0.0, 255.0);
+    }
+    return out;
+}
+
+
+
 // ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
@@ -275,7 +343,12 @@ int main(int argc, char** argv){
         auto line = resample_line(segline, W);
         std::vector<uint8_t> row(W);
         for (int j=0;j<W;++j) row[j] = (uint8_t)std::lround(std::clamp(line[j]*255.0f, 0.0f, 255.0f));
-        rows.push_back(std::move(row));
+
+        //rows.push_back(std::move(row));
+        // Apply multi-level Haar denoising
+        auto denoisedRow = haar_denoise_multi(row, 3, 15.0); // levels=3, threshold=8
+        rows.push_back(std::move(denoisedRow));
+
     }
 
     int H = (int)rows.size();
