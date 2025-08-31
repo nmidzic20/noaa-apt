@@ -328,7 +328,6 @@ int main(int argc, char** argv){
     }
 
     // ----- PSEUDO COLOR COMPOSITE -----
-    // 1) Gather global percentiles for VIS and IR to normalize channels robustly
     std::vector<float> allVIS; allVIS.reserve((size_t)H * W);
     std::vector<float> allIR;  allIR .reserve((size_t)H * W);
     for (int r=0;r<H;++r) {
@@ -337,40 +336,56 @@ int main(int argc, char** argv){
     }
     auto pct = [](std::vector<float>& v, double p){
         if (v.empty()) return 0.f;
-        size_t k = (size_t)std::clamp((int)std::round((p/100.0)*(v.size()-1)), 0, (int)v.size()-1);
+        size_t k = (size_t)std::clamp<int>(std::lround((p/100.0)*(v.size()-1)), 0, (int)v.size()-1);
         std::nth_element(v.begin(), v.begin()+k, v.end());
         return v[k];
     };
     std::vector<float> tmpVIS = allVIS, tmpIR = allIR;
-    float vis_lo = pct(tmpVIS, 1.0), vis_hi = pct(tmpVIS, 99.0);
-    float ir_lo  = pct(tmpIR,  1.0), ir_hi  = pct(tmpIR,  99.0);
-    float eps = 1e-6f;
+    float vis_lo = pct(tmpVIS, 1.0f), vis_hi = pct(tmpVIS, 99.0f);
+    float ir_lo  = pct(tmpIR , 1.0f), ir_hi  = pct(tmpIR , 99.0f);
+    auto norm = [&](float v, float lo, float hi){ return fclamp((v - lo) / std::max(hi - lo, 1e-6f)); };
 
-    auto norm = [&](float v, float lo, float hi){
-        return fclamp((v - lo) / std::max(hi - lo, eps));
+    // smoothstep helper for soft masks
+    auto smoothstep = [](float e0, float e1, float x){
+        float t = fclamp((x - e0) / std::max(e1 - e0, 1e-6f));
+        return t*t*(3.f - 2.f*t);
     };
 
-    // 2) Compose RGB using VIS luminance and NDVI-like cue (IR vs VIS)
+    // palette (tweak to taste)
+    const float landRGB[3] = {0.75f, 0.65f, 0.50f};   // beige
+    const float vegRGB [3] = {0.15f, 0.70f, 0.20f};   // greener vegetation
+    const float waterRGB[3] = {0.15f, 0.35f, 0.85f};  // deep blue
+    const float cloudRGB[3] = {0.97f, 0.97f, 0.99f};  // near white
+
+    // gamma on VIS luminance to lift mid-tones
+    const float GAMMA_L = 0.90f;      // <1 brightens a bit
+
     std::vector<uint8_t> rgb((size_t)H*W*3);
     for (int r=0;r<H;++r) {
         for (int c=0;c<W;++c) {
             float vis = norm(visRowsF[r][c], vis_lo, vis_hi);
             float ir  = norm(irRowsF [r][c], ir_lo , ir_hi );
+            float L   = std::pow(vis, GAMMA_L);
 
-            // NDVI-like: [-1..1], then to [0..1]
-            float ndvi = (ir - vis) / (ir + vis + eps);
-            float vmask = fclamp(0.5f * (ndvi + 1.0f)); // vegetation mask in [0..1]
+            // indices
+            float ndvi = (ir - vis) / (ir + vis + 1e-6f);        // vegetation
+            float ndwi = (vis - ir) / (vis + ir + 1e-6f);        // water-ish
 
-            // Luminance base from VIS
-            float L = vis;
+            // masks (thresholds chosen for APT; adjust if needed)
+            float veg   = smoothstep(0.05f, 0.25f, ndvi);         // more aggressive veg
+            float water = smoothstep(0.08f, 0.28f, ndwi);
+            float neutral = 1.0f - smoothstep(0.10f, 0.25f, std::abs(ndvi));
+            float cloud = smoothstep(0.75f, 0.90f, L) * neutral;  // bright + NDVI~0
 
-            // Heuristic mapping:
-            // - vegetation (high vmask) → more green
-            // - ocean (low L, low vmask) → deeper blue
-            // - clouds (high L, low |ndvi|) stay white-ish
-            float R = fclamp(0.50f*L + 0.80f*vmask);
-            float G = fclamp(0.90f*L + 0.20f*vmask);
-            float B = fclamp(1.00f*L - 0.50f*vmask + 0.10f);
+            // prevent over-assignment, leave some land base
+            water = std::max(water - 0.25f*veg, 0.0f);
+            float sum = veg + water + cloud;
+            float land = std::max(1.0f - sum, 0.0f);
+
+            // blend
+            float R = L*(land*landRGB[0] + veg*vegRGB[0] + water*waterRGB[0]) + cloud*cloudRGB[0];
+            float G = L*(land*landRGB[1] + veg*vegRGB[1] + water*waterRGB[1]) + cloud*cloudRGB[1];
+            float B = L*(land*landRGB[2] + veg*vegRGB[2] + water*waterRGB[2]) + cloud*cloudRGB[2];
 
             size_t idx = ((size_t)r*W + c)*3;
             rgb[idx+0] = to_u8(R);
@@ -379,9 +394,28 @@ int main(int argc, char** argv){
         }
     }
 
-    // 3) Write RGB PNG
-    int stride = W*3;
-    if (!stbi_write_png(outpng.c_str(), W, H, 3, rgb.data(), stride)) {
+    // --- Optional: LAB-CLAHE on L + unsharp for crisper borders ---
+    {
+        cv::Mat rgbMat(H, W, CV_8UC3, rgb.data());
+        cv::Mat lab; cv::cvtColor(rgbMat, lab, cv::COLOR_RGB2Lab);
+        std::vector<cv::Mat> ch; cv::split(lab, ch);
+
+        // CLAHE on L
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8,8));
+        clahe->apply(ch[0], ch[0]);
+
+        // unsharp on L
+        cv::Mat blurL;
+        cv::GaussianBlur(ch[0], blurL, cv::Size(0,0), 1.2);
+        cv::addWeighted(ch[0], 1.0 + 0.6, blurL, -0.6, 0.0, ch[0]); // amount=0.6
+
+        cv::merge(ch, lab);
+        cv::cvtColor(lab, rgbMat, cv::COLOR_Lab2RGB);
+        // rgb bytes already updated in-place
+    }
+
+    // Write RGB PNG
+    if (!stbi_write_png(outpng.c_str(), W, H, 3, rgb.data(), W*3)) {
         std::cerr << "Failed to write PNG (pseudo)\n"; return 1;
     }
     std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") pseudo-color (VIS+IR)\n";
