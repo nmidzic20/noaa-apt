@@ -14,7 +14,13 @@ cmake --build build --config Release
 
 .\build\Release\noaa_apt.exe "C:\path\to\input.wav" "C:\path\to\out.png" 1200
 
-.\build\Release\noaa_apt.exe ".\test.wav" ".\out.png" 1200
+.\build\Release\noaa_apt.exe ".\test.wav" ".\out.png" 1200 manual pseudo
+
+# args: 1 2 3 4 5
+
+# width default=1200; mode arg kept for compatibility ("manual"/"opencv", not used in pseudo)
+
+# set last arg to "pseudo" to enable the composite
 
 For FTT, install from within vcpkg:
 

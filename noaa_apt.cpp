@@ -9,6 +9,9 @@
 #include <complex>
 #include <fftw3.h>
 #include <samplerate.h>
+
+// If you want OpenCV post-proc for the non-pseudo path, keep these includes;
+// they are not used in pseudo mode.
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/photo.hpp>
@@ -55,14 +58,12 @@ struct Biquad {
     }
 };
 
-// Zero-phase filter by forward/backward pass
 static void filtfilt(std::vector<float>& x, Biquad biq) {
     for (auto& s : x) s = biq.process(s);
     biq.reset();
     for (int i=(int)x.size()-1; i>=0; --i) x[i] = biq.process(x[i]);
 }
 
-// Goertzel (power at a single frequency)
 static double goertzel_power(const float* x, int N, double fs, double f) {
     int k = int(0.5 + (N * f) / fs);
     double w = (2.0 * M_PI / N) * k;
@@ -76,11 +77,10 @@ static double goertzel_power(const float* x, int N, double fs, double f) {
     return power;
 }
 
-// Linear resample to fixed length
 static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
     std::vector<float> out(W, 0.f);
     if (seg.size() < 2) return out;
-    double scale = double(seg.size()-1) / (W-1);
+    double scale = double(seg.size()-1) / std::max(1, W-1);
     for (int i=0;i<W;++i) {
         double t = i*scale;
         int i0 = std::min<int>((int)seg.size()-2, (int)t);
@@ -93,11 +93,11 @@ static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
 // ------------------ Hilbert FFT envelope ------------------
 static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     int N = (int)x.size();
+    if (N<=0) return {};
     std::vector<std::complex<double>> X(N);
 
     fftw_complex* in  = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
     fftw_complex* out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
-
     for (int i=0;i<N;i++) { in[i][0] = x[i]; in[i][1] = 0.0; }
 
     fftw_plan fwd = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
@@ -106,11 +106,11 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     for (int k=0; k<N; k++) {
         std::complex<double> val(out[k][0], out[k][1]);
         if (k == 0 || (N%2==0 && k==N/2)) {
-            X[k] = val; // keep DC and Nyquist
+            X[k] = val;
         } else if (k < N/2) {
-            X[k] = 2.0*val; // positive freqs
+            X[k] = 2.0*val;
         } else {
-            X[k] = 0.0;     // negative freqs
+            X[k] = 0.0;
         }
     }
 
@@ -129,114 +129,34 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     fftw_destroy_plan(inv);
     fftw_free(in);
     fftw_free(out);
-
     return env;
 }
 
-// --- Multi-level Haar wavelet denoising (for "manual" mode) ---
-static void haar_dwt(std::vector<double>& data, int levels) {
-    int n = (int)data.size();
-    for (int lev=0; lev<levels; lev++) {
-        int step = n >> lev;
-        if (step < 2) break;
-        std::vector<double> approx(step/2), detail(step/2);
-        for (int i=0; i<step/2; i++) {
-            approx[i] = (data[2*i] + data[2*i+1]) / 2.0;
-            detail[i] = (data[2*i] - data[2*i+1]) / 2.0;
-        }
-        for (int i=0; i<step/2; i++) {
-            data[i] = approx[i];
-            data[step/2 + i] = detail[i];
-        }
-    }
+// --------- small utils ----------
+static inline float fclamp(float v, float a=0.f, float b=1.f) {
+    return std::min(std::max(v, a), b);
 }
-
-static void haar_idwt(std::vector<double>& data, int levels) {
-    int n = (int)data.size();
-    for (int lev=levels-1; lev>=0; lev--) {
-        int step = n >> lev;
-        if (step < 2) continue;
-        std::vector<double> approx(step/2), detail(step/2);
-        for (int i=0; i<step/2; i++) {
-            approx[i] = data[i];
-            detail[i] = data[step/2 + i];
-        }
-        for (int i=0; i<step/2; i++) {
-            data[2*i]   = approx[i] + detail[i];
-            data[2*i+1] = approx[i] - detail[i];
-        }
-    }
-}
-
-static std::vector<uint8_t> haar_denoise_multi(const std::vector<uint8_t>& row, int levels, double thresh) {
-    int n = (int)row.size();
-    std::vector<double> data(row.begin(), row.end());
-
-    haar_dwt(data, levels);
-
-    int offset = 0;
-    for (int lev=0; lev<levels; lev++) {
-        int step = n >> lev;
-        int half = step/2;
-        offset += half; // details start here
-        for (int i=0; i<half; i++) {
-            double& d = data[offset + i];
-            if (std::abs(d) < thresh) d = 0;
-            else d = (d > 0 ? d-thresh : d+thresh); // soft threshold
-        }
-    }
-
-    haar_idwt(data, levels);
-
-    std::vector<uint8_t> out(n);
-    for (int i=0; i<n; i++) {
-        out[i] = (uint8_t)std::clamp(std::round(data[i]), 0.0, 255.0);
-    }
-    return out;
-}
-
-// ---- Colormap name -> OpenCV enum (returns -1 for gray) ----
-static int map_colormap(const std::string& name) {
-    std::string s = name;
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return (char)std::tolower(c); });
-    if (s=="gray" || s=="greyscale" || s=="grayscale" || s=="none") return -1;
-    if (s=="jet")      return cv::COLORMAP_JET;
-    if (s=="ocean")    return cv::COLORMAP_OCEAN;
-    //if (s=="terrain")  return cv::COLORMAP_TERRAIN;
-    if (s=="hot")      return cv::COLORMAP_HOT;
-    if (s=="bone")     return cv::COLORMAP_BONE;
-    if (s=="winter")   return cv::COLORMAP_WINTER;
-    if (s=="rainbow")  return cv::COLORMAP_RAINBOW;
-    if (s=="autumn")   return cv::COLORMAP_AUTUMN;
-    if (s=="summer")   return cv::COLORMAP_SUMMER;
-    if (s=="spring")   return cv::COLORMAP_SPRING;
-    if (s=="cool")     return cv::COLORMAP_COOL;
-    if (s=="hsv")      return cv::COLORMAP_HSV;
-    if (s=="pink")     return cv::COLORMAP_PINK;
-    if (s=="parula")   return cv::COLORMAP_PARULA;
-#ifdef CV_COLORMAP_TURBO
-    if (s=="turbo")    return cv::COLORMAP_TURBO;
-#else
-    if (s=="turbo")    return cv::COLORMAP_JET; // fallback
-#endif
-    return -1; // default to gray if unknown
+static inline uint8_t to_u8(float v) {
+    return (uint8_t)std::lround(fclamp(v)*255.0f);
 }
 
 // ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200] [mode] [color]\n";
-        std::cerr << "Modes: opencv (default) | manual\n";
-        std::cerr << "Color: gray (default) | jet | ocean | terrain | hot | bone | winter | rainbow | autumn | summer | spring | cool | hsv | pink | parula | turbo\n";
+        std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200] [mode=manual] [color=gray|jet|turbo|hot|bone|ocean|pseudo]\n";
         return 1;
     }
     std::string inpath = argv[1];
     std::string outpng = argv[2];
     int W = (argc>=4)? std::max(200, std::atoi(argv[3])) : 1200;
-    std::string mode  = (argc>=5)? std::string(argv[4]) : std::string("opencv"); // default
-    std::string color = (argc>=6)? std::string(argv[5]) : std::string("gray");   // default
+    std::string mode = (argc>=5)? std::string(argv[4]) : "manual";
+    std::string color = (argc>=6)? std::string(argv[5]) : "gray";
+    // to lower
+    std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+    std::transform(color.begin(), color.end(), color.begin(), ::tolower);
+    bool wantPseudo = (color == "pseudo");
 
-    // --- Read WAV (libsndfile) ---
+    // --- Read WAV ---
     SndfileHandle snd(inpath);
     if (snd.error()) { std::cerr << "libsndfile error\n"; return 1; }
     int fs = snd.samplerate();
@@ -255,7 +175,7 @@ int main(int argc, char** argv){
     for (auto v: y) maxv = std::max(maxv, std::abs(v));
     if (maxv>0) for (auto& v: y) v /= maxv;
 
-    // --- Band-limit around subcarrier (~2.4 kHz) ---
+    // --- Band-limit around the subcarrier and smooth ---
     Biquad bp = Biquad::bandpass(fs, 2400.0, 1.5);
     std::vector<float> yb = y;
     for (auto& s: yb) s = bp.process(s);
@@ -268,7 +188,7 @@ int main(int argc, char** argv){
     double ratio = 1.0 / DEC;
     std::vector<float> yd(yb.size() / DEC + 100);
 
-    SRC_DATA src_data;
+    SRC_DATA src_data{};
     src_data.data_in = yb.data();
     src_data.input_frames = (long)yb.size();
     src_data.data_out = yd.data();
@@ -277,28 +197,18 @@ int main(int argc, char** argv){
     src_data.end_of_input = 1;
 
     int err = src_simple(&src_data, SRC_SINC_BEST_QUALITY, 1);
-    if (err) {
-        std::cerr << "libsamplerate error: " << src_strerror(err) << "\n";
-        return 1;
-    }
+    if (err) { std::cerr << "libsamplerate error: " << src_strerror(err) << "\n"; return 1; }
     yd.resize(src_data.output_frames_gen);
 
-    // --- Envelope with Hilbert FFT ---
+    // Envelope with Hilbert FFT, then light LPF + DC-block
     std::vector<float> env = hilbert_envelope_fft(yd);
     filtfilt(env, Biquad::lowpass(fs_d, 3000.0));
-
-    // --- DC-block ---
     {
-        float px = 0.f, py = 0.f;
-        const float r = 0.995f;
-        for (auto& s : env) {
-            float y_ = s - px + r * py;
-            px = s; py = y_;
-            s = y_;
-        }
+        float px = 0.f, py = 0.f; const float r = 0.995f;
+        for (auto& s : env) { float y_ = s - px + r * py; px = s; py = y_; s = y_; }
     }
 
-    // --- Sync detection (Goertzel on sliding windows) ---
+    // --- Sync detection (as before) ---
     const double f1 = 1040.0, f2 = 832.0;
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs_d*win_ms/1000);
@@ -339,17 +249,22 @@ int main(int argc, char** argv){
     }
     if (line_starts.size() < 10) { std::cerr << "Too few line starts.\n"; return 1; }
 
-    // --- Assemble image rows with per-line normalization ---
-    std::vector<std::vector<uint8_t>> rows;
-    rows.reserve(line_starts.size());
-    static std::vector<double> recentMeans; // for running-median AGC
+    // --- Build per-line data ---
+    // If pseudo color requested: collect VIS/IR float rows
+    // Else: collect grayscale rows (uint8) as before
+    std::vector<std::vector<float>> visRowsF, irRowsF;
+    std::vector<std::vector<uint8_t>> grayRows;
+
+    // Heuristic layout fractions: skip sync/porch, then split remaining into VIS/IR halves
+    const double skip_frac = 0.08; // ~8% of line to skip (sync + black porch)
     for (size_t i=0;i+1<line_starts.size();++i){
         int s0 = line_starts[i];
         int s1 = line_starts[i+1];
         if (s1 <= s0 + int(0.2*fs_d)) continue;
+
         std::vector<float> segline(env.begin()+s0, env.begin()+s1);
 
-        // percentile clip (1–99%)
+        // robust percentile clip per line (1–99%)
         std::vector<float> tmp = segline;
         std::nth_element(tmp.begin(), tmp.begin()+ (int)tmp.size()/100, tmp.end());
         float lo = tmp[(int)tmp.size()/100];
@@ -358,10 +273,11 @@ int main(int argc, char** argv){
         if (hi <= lo) continue;
         for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
 
-        // running-median per-row normalization
+        // Running-median style per-line gain normalization (as before)
         double mean = 0.0;
         for (auto v : segline) mean += v;
         mean /= std::max<size_t>(1, segline.size());
+        static std::vector<double> recentMeans;
         recentMeans.push_back(mean);
         size_t Wm = 101;
         if (recentMeans.size() > Wm) recentMeans.erase(recentMeans.begin());
@@ -372,91 +288,102 @@ int main(int argc, char** argv){
         gainMed = std::clamp(gainMed, 0.7, 1.4);
         for (auto& v : segline) v = std::clamp(float(v * gainMed), 0.0f, 1.0f);
 
-        auto line = resample_line(segline, W);
-        std::vector<uint8_t> row(W);
-        for (int j=0;j<W;++j) row[j] = (uint8_t)std::lround(std::clamp(line[j]*255.0f, 0.0f, 255.0f));
+        if (wantPseudo) {
+            // --- split into VIS (first half after skip) and IR (second half) ---
+            int n = (int)segline.size();
+            int start = std::clamp((int)std::round(n*skip_frac), 0, n);
+            int rem = n - start;
+            if (rem < 20) continue;
+            int half = rem/2;
+            std::vector<float> segVIS(segline.begin()+start, segline.begin()+start+half);
+            std::vector<float> segIR (segline.begin()+start+half, segline.begin()+start+2*half);
 
-        rows.push_back(std::move(row));
-    }
-    if (rows.empty()) { std::cerr << "No rows assembled.\n"; return 1; }
-
-    const int H = (int)rows.size();
-
-    // --------- BRANCH: manual vs OpenCV ----------
-    std::vector<uint8_t> grayBuf; // final grayscale before optional color
-    if (mode == "manual") {
-        // Haar denoise each row
-        for (auto& row : rows) {
-            row = haar_denoise_multi(row, 3, 15.0); // levels, threshold
+            auto visL = resample_line(segVIS, W);
+            auto irL  = resample_line(segIR,  W);
+            visRowsF.push_back(std::move(visL));
+            irRowsF .push_back(std::move(irL));
+        } else {
+            // grayscale path (unchanged)
+            auto line = resample_line(segline, W);
+            std::vector<uint8_t> row(W);
+            for (int j=0;j<W;++j) row[j] = (uint8_t)std::lround(std::clamp(line[j]*255.0f, 0.0f, 255.0f));
+            grayRows.push_back(std::move(row));
         }
-        grayBuf.resize(H*W);
-        for (int r=0;r<H;++r)
-            std::copy(rows[r].begin(), rows[r].end(), grayBuf.begin()+r*W);
+    }
 
-        // Global histogram equalization
-        const int levels = 256;
-        std::vector<int> hist(levels, 0);
-        for (auto v : grayBuf) hist[v]++;
-        std::vector<int> cdf(levels, 0);
-        cdf[0] = hist[0];
-        for (int i=1;i<levels;i++) cdf[i] = cdf[i-1] + hist[i];
-        int total = H * W;
-        int cdf_min = 0;
-        for (int i=0;i<levels;i++) { if (cdf[i] != 0) { cdf_min = cdf[i]; break; } }
-        std::vector<uint8_t> lut(levels);
-        for (int i=0;i<levels;i++) {
-            lut[i] = (uint8_t)std::round(((double)(cdf[i] - cdf_min) / (std::max(1, total - cdf_min))) * 255.0);
+    int H = wantPseudo ? (int)visRowsF.size() : (int)grayRows.size();
+    if (H < 10) { std::cerr << "Too few rows.\n"; return 1; }
+
+    if (!wantPseudo) {
+        // ----- legacy grayscale (optionally you can add OpenCV here like before) -----
+        std::vector<uint8_t> img(H*W);
+        for (int r=0;r<H;++r) std::copy(grayRows[r].begin(), grayRows[r].end(), img.begin()+r*W);
+
+        // If you want OpenCV CLAHE+denoise (non-pseudo), you can drop it here using img -> cv::Mat
+        if (!stbi_write_png(outpng.c_str(), W, H, 1, img.data(), W)) {
+            std::cerr << "Failed to write PNG\n"; return 1;
         }
-        for (auto& v : grayBuf) v = lut[v];
-
-    } else {
-        // OpenCV CLAHE + NLM
-        grayBuf.resize(H*W);
-        for (int r=0;r<H;++r)
-            std::copy(rows[r].begin(), rows[r].end(), grayBuf.begin()+r*W);
-
-        cv::Mat imgMat(H, W, CV_8UC1, grayBuf.data());
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
-        clahe->setClipLimit(2.0);
-        clahe->setTilesGridSize(cv::Size(8, 8));
-        cv::Mat imgClahe;
-        clahe->apply(imgMat, imgClahe);
-
-        cv::Mat imgDenoised;
-        cv::fastNlMeansDenoising(imgClahe, imgDenoised, 10, 7, 21);
-
-        // overwrite grayBuf with denoised result
-        grayBuf.assign(imgDenoised.begin<uint8_t>(), imgDenoised.end<uint8_t>());
+        std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") grayscale\n";
+        return 0;
     }
 
-    // --------- Optional color mapping with OpenCV ---------
-int cmap = map_colormap(color);
-if (cmap < 0) {
-    // Gray output
-    if (!stbi_write_png(outpng.c_str(), W, H, 1, grayBuf.data(), W)) {
-        std::cerr << "Failed to write PNG\n"; return 1;
+    // ----- PSEUDO COLOR COMPOSITE -----
+    // 1) Gather global percentiles for VIS and IR to normalize channels robustly
+    std::vector<float> allVIS; allVIS.reserve((size_t)H * W);
+    std::vector<float> allIR;  allIR .reserve((size_t)H * W);
+    for (int r=0;r<H;++r) {
+        allVIS.insert(allVIS.end(), visRowsF[r].begin(), visRowsF[r].end());
+        allIR .insert(allIR .end(), irRowsF [r].begin(), irRowsF [r].end());
     }
-    std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") mode=" << mode << " color=gray\n";
-} else {
-    cv::Mat grayMat(H, W, CV_8UC1, grayBuf.data());
-    if (!grayMat.isContinuous()) grayMat = grayMat.clone(); // ensure contiguous
+    auto pct = [](std::vector<float>& v, double p){
+        if (v.empty()) return 0.f;
+        size_t k = (size_t)std::clamp((int)std::round((p/100.0)*(v.size()-1)), 0, (int)v.size()-1);
+        std::nth_element(v.begin(), v.begin()+k, v.end());
+        return v[k];
+    };
+    std::vector<float> tmpVIS = allVIS, tmpIR = allIR;
+    float vis_lo = pct(tmpVIS, 1.0), vis_hi = pct(tmpVIS, 99.0);
+    float ir_lo  = pct(tmpIR,  1.0), ir_hi  = pct(tmpIR,  99.0);
+    float eps = 1e-6f;
 
-    cv::Mat bgr;
-    cv::applyColorMap(grayMat, bgr, cmap);         // BGR, CV_8UC3
-    if (!bgr.data) { std::cerr << "applyColorMap produced empty image\n"; return 1; }
+    auto norm = [&](float v, float lo, float hi){
+        return fclamp((v - lo) / std::max(hi - lo, eps));
+    };
 
-    cv::Mat rgb;
-    cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);     // RGB for stbi
-    if (!rgb.isContinuous()) rgb = rgb.clone();    // ensure contiguous
+    // 2) Compose RGB using VIS luminance and NDVI-like cue (IR vs VIS)
+    std::vector<uint8_t> rgb((size_t)H*W*3);
+    for (int r=0;r<H;++r) {
+        for (int c=0;c<W;++c) {
+            float vis = norm(visRowsF[r][c], vis_lo, vis_hi);
+            float ir  = norm(irRowsF [r][c], ir_lo , ir_hi );
 
-    // Use Mat's stride (bytes per row). stb expects row stride in bytes.
-    int stride = static_cast<int>(rgb.step);
-    if (!stbi_write_png(outpng.c_str(), W, H, 3, rgb.data, stride)) {
-        std::cerr << "Failed to write PNG (color)\n"; return 1;
+            // NDVI-like: [-1..1], then to [0..1]
+            float ndvi = (ir - vis) / (ir + vis + eps);
+            float vmask = fclamp(0.5f * (ndvi + 1.0f)); // vegetation mask in [0..1]
+
+            // Luminance base from VIS
+            float L = vis;
+
+            // Heuristic mapping:
+            // - vegetation (high vmask) → more green
+            // - ocean (low L, low vmask) → deeper blue
+            // - clouds (high L, low |ndvi|) stay white-ish
+            float R = fclamp(0.50f*L + 0.80f*vmask);
+            float G = fclamp(0.90f*L + 0.20f*vmask);
+            float B = fclamp(1.00f*L - 0.50f*vmask + 0.10f);
+
+            size_t idx = ((size_t)r*W + c)*3;
+            rgb[idx+0] = to_u8(R);
+            rgb[idx+1] = to_u8(G);
+            rgb[idx+2] = to_u8(B);
+        }
     }
-    std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") mode=" << mode << " color=" << color << "\n";
-}
 
-
+    // 3) Write RGB PNG
+    int stride = W*3;
+    if (!stbi_write_png(outpng.c_str(), W, H, 3, rgb.data(), stride)) {
+        std::cerr << "Failed to write PNG (pseudo)\n"; return 1;
+    }
+    std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") pseudo-color (VIS+IR)\n";
     return 0;
 }
