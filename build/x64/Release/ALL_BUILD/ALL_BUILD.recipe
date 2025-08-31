@@ -5,7 +5,28 @@
       <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\x64\Release\ZERO_CHECK</FullPath>
     </ProjectOutput>
     <ProjectOutput>
-      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\noaa_apt.exe</FullPath>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\abs_val.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\contrast.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\cosine.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\falsecolour.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\hilbertFFT.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\hilbertFIR.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\pseudocolour1.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\Release\pseudocolour2.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>C:\Users\Korisnik\FOI\Diplomski\software\cmake\dev\noaa\build\x64\Release\ALL_BUILD</FullPath>
