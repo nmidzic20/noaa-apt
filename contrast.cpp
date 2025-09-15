@@ -21,7 +21,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// ------------------ Biquad + helpers ------------------
 struct Biquad {
     double b0=1, b1=0, b2=0, a1=0, a2=0;
     double z1=0, z2=0;
@@ -83,23 +82,19 @@ static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
     return out;
 }
 
-// ------------------ Hilbert FFT envelope ------------------
+// hilbert FFT envelope
 static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     int N = (int)x.size();
     std::vector<std::complex<double>> X(N);
 
-    // Allocate FFTW arrays
     fftw_complex* in  = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
     fftw_complex* out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
 
-    // Copy input
     for (int i=0;i<N;i++) { in[i][0] = x[i]; in[i][1] = 0.0; }
 
-    // Forward FFT
     fftw_plan fwd = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
     fftw_execute(fwd);
 
-    // Apply Hilbert transform in frequency domain
     for (int k=0; k<N; k++) {
         std::complex<double> val(out[k][0], out[k][1]);
         if (k == 0 || (N%2==0 && k==N/2)) {
@@ -111,12 +106,12 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
         }
     }
 
-    // Inverse FFT
+    // inverse FFT
     for (int i=0;i<N;i++) { in[i][0] = X[i].real(); in[i][1] = X[i].imag(); }
     fftw_plan inv = fftw_plan_dft_1d(N, in, out, FFTW_BACKWARD, FFTW_ESTIMATE);
     fftw_execute(inv);
 
-    // Envelope = magnitude of analytic signal
+    // envelope = magnitude of analytic signal
     std::vector<float> env(N);
     for (int i=0;i<N;i++) {
         double re = out[i][0]/N;
@@ -132,7 +127,6 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     return env;
 }
 
-// ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200]\n";
@@ -165,7 +159,6 @@ int main(int argc, char** argv){
     bp.reset();
     filtfilt(yb, Biquad::lowpass(fs, 4500.0));
 
-    // --- High-quality resampling using libsamplerate ---
     const int DEC = 4;
     int fs_d = fs / DEC;
     double ratio = 1.0 / DEC;
@@ -186,7 +179,7 @@ int main(int argc, char** argv){
     }
     yd.resize(src_data.output_frames_gen);
 
-    // Envelope with Hilbert FFT
+    // envelope with Hilbert FFT
     std::vector<float> env = hilbert_envelope_fft(yd);
     filtfilt(env, Biquad::lowpass(fs_d, 3000.0));
 
@@ -201,7 +194,7 @@ int main(int argc, char** argv){
         }
     }
 
-    // --- Sync detection etc (unchanged) ---
+    // sync detection etc 
     const double f1 = 1040.0, f2 = 832.0;
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs_d*win_ms/1000);
@@ -282,13 +275,12 @@ int main(int argc, char** argv){
     std::vector<uint8_t> img(H*W);
     for (int r=0;r<H;++r) std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
 
-        // --- Global histogram equalization for contrast enhancement ---
+        // global histogram equalisation for contrast 
     {
         const int levels = 256;
         std::vector<int> hist(levels, 0);
         for (auto v : img) hist[v]++;
 
-        // Compute CDF
         std::vector<int> cdf(levels, 0);
         cdf[0] = hist[0];
         for (int i=1;i<levels;i++) cdf[i] = cdf[i-1] + hist[i];
@@ -297,7 +289,6 @@ int main(int argc, char** argv){
         int cdf_min = 0;
         for (int i=0;i<levels;i++) { if (cdf[i] != 0) { cdf_min = cdf[i]; break; } }
 
-        // Map through equalization LUT
         std::vector<uint8_t> lut(levels);
         for (int i=0;i<levels;i++) {
             lut[i] = (uint8_t)std::round(((double)(cdf[i] - cdf_min) / (total - cdf_min)) * 255.0);

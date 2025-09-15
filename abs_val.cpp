@@ -1,5 +1,3 @@
-// Rectifier + LPF (using absolute value)
-
 #include <sndfile.hh>
 #include <vector>
 #include <cmath>
@@ -20,7 +18,6 @@
 #endif
 
 struct Biquad {
-    // RBJ audio EQ cookbook biquad
     double b0=1, b1=0, b2=0, a1=0, a2=0;
     double z1=0, z2=0;
     inline float process(float x) {
@@ -31,7 +28,6 @@ struct Biquad {
     }
     inline void reset(){ z1=z2=0; }
     static Biquad bandpass(double fs, double f0, double Q) {
-        // constant skirt gain, peak gain = Q
         Biquad biq;
         double w0 = 2.0*M_PI*f0/fs, alpha = sin(w0)/(2.0*Q);
         double b0=  Q*alpha, b1= 0, b2= -Q*alpha;
@@ -50,16 +46,12 @@ struct Biquad {
     }
 };
 
-// Zero-phase filter by forward/backward pass (like filtfilt)
 static void filtfilt(std::vector<float>& x, Biquad biq) {
-    // forward
     for (auto& s : x) s = biq.process(s);
     biq.reset();
-    // reverse
     for (int i=(int)x.size()-1; i>=0; --i) x[i] = biq.process(x[i]);
 }
 
-// Simple Goertzel (power at a single frequency)
 static double goertzel_power(const float* x, int N, double fs, double f) {
     int k = int(0.5 + (N * f) / fs);
     double w = (2.0 * M_PI / N) * k;
@@ -73,7 +65,6 @@ static double goertzel_power(const float* x, int N, double fs, double f) {
     return power;
 }
 
-// Linear resample to fixed length
 static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
     std::vector<float> out(W);
     double scale = double(seg.size()-1) / (W-1);
@@ -95,7 +86,6 @@ int main(int argc, char** argv){
     std::string outpng = argv[2];
     int W = (argc>=4)? std::max(200, std::atoi(argv[3])) : 1200;
 
-    // --- Read WAV (libsndfile) ---
     SndfileHandle snd(inpath);
     if (snd.error()) { std::cerr << "libsndfile error\n"; return 1; }
     int fs = snd.samplerate();
@@ -109,26 +99,24 @@ int main(int argc, char** argv){
     if (ch==1) {
         y = std::move(buf);
     } else {
-        // take channel 0
         for (sf_count_t i=0;i<N;++i) y[i] = buf[i*ch + 0];
     }
-    // normalize
     float maxv = 0.f;
     for (auto v: y) maxv = std::max(maxv, std::abs(v));
     if (maxv>0) for (auto& v: y) v /= maxv;
 
-    // --- Band-pass ~1.5–3.5 kHz using two cascaded biquads centered at 2.4 kHz ---
+    // band-pass 1.5–3.5 khz using two cascaded biquads centered at 2.4 khz
     Biquad bp = Biquad::bandpass(fs, 2400.0, 1.5); // gentler
     std::vector<float> yb = y;
     for (auto& s: yb) s = bp.process(s);
     bp.reset();
     filtfilt(yb, Biquad::lowpass(fs, 4500.0));     // touch of smoothing pre-envelope
 
-    // --- Envelope via rectifier + low-pass ---
+    // envelope via rectifier + low-pass
     for (auto& s: yb) s = std::abs(s);
     filtfilt(yb, Biquad::lowpass(fs, 2500.0)); // smooth video
 
-    // --- Sync detection (Goertzel on sliding windows) ---
+    // sync detection (Goertzel on sliding windows)
     const double f1 = 1040.0, f2 = 832.0; // NOAA APT sync tones
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs*win_ms/1000);
@@ -148,7 +136,6 @@ int main(int argc, char** argv){
         scores.push_back(p);
         centers.push_back(start + win/2);
     }
-    // Normalize scores
     double minsc=*std::min_element(scores.begin(), scores.end());
     double maxsc=*std::max_element(scores.begin(), scores.end());
     if (maxsc>minsc) {
@@ -157,7 +144,7 @@ int main(int argc, char** argv){
         std::cerr << "Flat scores; sync not found.\n"; return 1;
     }
 
-    // Peak picking with refractory period ~0.4 s
+    // peak picking with refractory period ~0.4 s
     int minDistHops = int(0.40 * fs / hop);
     std::vector<int> peaks;
     double thr = 0.2;
@@ -171,7 +158,7 @@ int main(int argc, char** argv){
             if (argmax==i) { peaks.push_back(centers[i]); last = i; }
         }
     }
-    // Drop too-close peaks (<0.2 s apart)
+    // drop too-close peaks (<0.2 s apart)
     std::vector<int> line_starts;
     for (size_t i=0;i<peaks.size();++i){
         if (i==0 || (peaks[i]-peaks[i-1]) > int(0.20*fs)) line_starts.push_back(peaks[i]);
@@ -182,7 +169,7 @@ int main(int argc, char** argv){
     }
     std::cerr << "Detected lines: " << line_starts.size() << "\n";
 
-    // --- Assemble image with per-line deskew + robust per-line AGC ---
+    // assemble image 
     std::vector<std::vector<uint8_t>> rows;
     rows.reserve(line_starts.size());
     for (size_t i=0;i+1<line_starts.size();++i){
@@ -200,14 +187,14 @@ int main(int argc, char** argv){
         if (hi <= lo) continue;
         for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
 
-        // Row-mean normalization to remove horizontal bands
+        // row-mean normalisation to remove horizontal bands
         double mean = 0.0;
         for (auto v : segline) mean += v;
         mean /= std::max<size_t>(1, segline.size());
 
         static std::vector<double> recentMeans;
         recentMeans.push_back(mean);
-        size_t Wm = 51; // window of ~51 lines
+        size_t Wm = 51; 
         if (recentMeans.size() > Wm) recentMeans.erase(recentMeans.begin());
         std::vector<double> sorted = recentMeans;
         std::nth_element(sorted.begin(), sorted.begin() + sorted.size()/2, sorted.end());

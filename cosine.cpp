@@ -87,7 +87,6 @@ int main(int argc, char** argv){
     std::string outpng = argv[2];
     int W = (argc>=4)? std::max(200, std::atoi(argv[3])) : 1200;
 
-    // --- Read WAV ---
     SndfileHandle snd(inpath);
     if (snd.error()) { std::cerr << "libsndfile error\n"; return 1; }
     int fs = snd.samplerate();
@@ -105,24 +104,20 @@ int main(int argc, char** argv){
     for (auto v: y) maxv = std::max(maxv, std::abs(v));
     if (maxv>0) for (auto& v: y) v /= maxv;
 
-    // --- Band-pass around subcarrier (~2.4 kHz) ---
     Biquad bp = Biquad::bandpass(fs, 2400.0, 1.5);
     std::vector<float> yb = y;
     for (auto& s: yb) s = bp.process(s);
     bp.reset();
     filtfilt(yb, Biquad::lowpass(fs, 4500.0));
 
-    // --- Cosine synchronous detection ---
     double fc = 2400.0;
     std::vector<float> demod(yb.size());
     for (size_t n=0; n<yb.size(); ++n) {
         double t = (double)n / fs;
         demod[n] = yb[n] * (float)std::cos(2.0*M_PI*fc*t);
     }
-    // Low-pass to recover baseband video
     filtfilt(demod, Biquad::lowpass(fs, 3000.0));
 
-    // --- Sync detection (Goertzel on sliding windows) ---
     const double f1 = 1040.0, f2 = 832.0;
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs*win_ms/1000);
@@ -170,7 +165,6 @@ int main(int argc, char** argv){
     }
     std::cerr << "Detected lines: " << line_starts.size() << "\n";
 
-    // --- Assemble image ---
     std::vector<std::vector<uint8_t>> rows;
     rows.reserve(line_starts.size());
     for (size_t i=0;i+1<line_starts.size();++i){
@@ -179,7 +173,6 @@ int main(int argc, char** argv){
         if (s1 <= s0 + int(0.2*fs)) continue;
         std::vector<float> segline(demod.begin()+s0, demod.begin()+s1);
 
-        // percentile clip
         std::vector<float> tmp = segline;
         std::nth_element(tmp.begin(), tmp.begin()+tmp.size()/100, tmp.end());
         float lo = tmp[tmp.size()/100];
@@ -188,7 +181,6 @@ int main(int argc, char** argv){
         if (hi <= lo) continue;
         for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
 
-        // simple per-row normalization
         double mean = 0.0;
         for (auto v : segline) mean += v;
         mean /= std::max<size_t>(1, segline.size());

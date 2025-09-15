@@ -20,7 +20,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// ------------------ Biquad + helpers ------------------
 struct Biquad {
     double b0=1, b1=0, b2=0, a1=0, a2=0;
     double z1=0, z2=0;
@@ -89,40 +88,33 @@ static std::vector<float> decimate(const std::vector<float>& x, int M) {
     return y;
 }
 
-// ------------------ Hilbert FFT envelope ------------------
 static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     int N = (int)x.size();
     std::vector<std::complex<double>> X(N);
 
-    // Allocate FFTW arrays
     fftw_complex* in  = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
     fftw_complex* out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
 
-    // Copy input
     for (int i=0;i<N;i++) { in[i][0] = x[i]; in[i][1] = 0.0; }
 
-    // Forward FFT
     fftw_plan fwd = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
     fftw_execute(fwd);
 
-    // Apply Hilbert transform in frequency domain
     for (int k=0; k<N; k++) {
         std::complex<double> val(out[k][0], out[k][1]);
         if (k == 0 || (N%2==0 && k==N/2)) {
-            X[k] = val; // keep DC and Nyquist as is
+            X[k] = val; 
         } else if (k < N/2) {
-            X[k] = 2.0*val; // double positive freqs
+            X[k] = 2.0*val;
         } else {
-            X[k] = 0.0;     // zero negative freqs
+            X[k] = 0.0;    
         }
     }
 
-    // Inverse FFT
     for (int i=0;i<N;i++) { in[i][0] = X[i].real(); in[i][1] = X[i].imag(); }
     fftw_plan inv = fftw_plan_dft_1d(N, in, out, FFTW_BACKWARD, FFTW_ESTIMATE);
     fftw_execute(inv);
 
-    // Envelope = magnitude of analytic signal
     std::vector<float> env(N);
     for (int i=0;i<N;i++) {
         double re = out[i][0]/N;
@@ -138,7 +130,6 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     return env;
 }
 
-// ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200]\n";
@@ -176,11 +167,9 @@ int main(int argc, char** argv){
     std::vector<float> yd = decimate(yb, DEC);
     int fs_d = fs / DEC;
 
-    // Envelope with Hilbert FFT
     std::vector<float> env = hilbert_envelope_fft(yd);
     filtfilt(env, Biquad::lowpass(fs_d, 3000.0));
 
-    // DC-block
     {
         float px = 0.f, py = 0.f;
         const float r = 0.995f;
@@ -191,7 +180,6 @@ int main(int argc, char** argv){
         }
     }
 
-    // --- Sync detection etc (unchanged) ---
     const double f1 = 1040.0, f2 = 832.0;
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs_d*win_ms/1000);

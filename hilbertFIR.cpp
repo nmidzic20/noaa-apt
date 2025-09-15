@@ -18,9 +18,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// ------------------ Biquad + helpers ------------------
 struct Biquad {
-    // RBJ audio EQ cookbook biquad
     double b0=1, b1=0, b2=0, a1=0, a2=0;
     double z1=0, z2=0;
     inline float process(float x) {
@@ -31,7 +29,6 @@ struct Biquad {
     }
     inline void reset(){ z1=z2=0; }
     static Biquad bandpass(double fs, double f0, double Q) {
-        // constant skirt gain, peak gain = Q
         Biquad biq;
         double w0 = 2.0*M_PI*f0/fs, alpha = sin(w0)/(2.0*Q);
         double b0=  Q*alpha, b1= 0, b2= -Q*alpha;
@@ -50,14 +47,12 @@ struct Biquad {
     }
 };
 
-// Zero-phase filter by forward/backward pass (like filtfilt)
 static void filtfilt(std::vector<float>& x, Biquad biq) {
     for (auto& s : x) s = biq.process(s);           // forward
     biq.reset();
     for (int i=(int)x.size()-1; i>=0; --i) x[i] = biq.process(x[i]); // reverse
 }
 
-// Simple Goertzel (power at a single frequency)
 static double goertzel_power(const float* x, int N, double fs, double f) {
     int k = int(0.5 + (N * f) / fs);
     double w = (2.0 * M_PI / N) * k;
@@ -71,7 +66,6 @@ static double goertzel_power(const float* x, int N, double fs, double f) {
     return power;
 }
 
-// Linear resample to fixed length
 static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
     std::vector<float> out(W);
     if (seg.size() < 2) return out;
@@ -85,7 +79,6 @@ static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
     return out;
 }
 
-// Decimate by integer M (assumes pre-anti-aliasing done)
 static std::vector<float> decimate(const std::vector<float>& x, int M) {
     std::vector<float> y;
     y.reserve(x.size()/M + 1);
@@ -93,22 +86,18 @@ static std::vector<float> decimate(const std::vector<float>& x, int M) {
     return y;
 }
 
-// ------------------ FIR Hilbert envelope ------------------
-// 65-tap odd-symmetric Hilbert transformer with Hamming window.
-// Imag[n] = x * h; Real path is a pure delay of (N-1)/2 samples.
-// Envelope = sqrt( Real_delayed^2 + Imag^2 )
+
 static std::vector<float> hilbert_envelope_fir(const std::vector<float>& x) {
-    constexpr int N = 65;                  // number of taps (odd)
-    constexpr int M = (N - 1) / 2;         // group delay
+    constexpr int N = 65;                  
+    constexpr int M = (N - 1) / 2;         
     static float h[N];
     static bool inited = false;
 
     if (!inited) {
-        // Ideal Hilbert: h[k] = 2/(pi*k) for odd k, 0 for even k; windowed
         for (int n=0; n<N; ++n) {
             int k = n - M;
             float val = 0.0f;
-            if (k != 0 && (k & 1)) {       // odd
+            if (k != 0 && (k & 1)) {       
                 val = 2.0f / (float)(M_PI * k);
             }
             // Hamming window to reduce ripple
@@ -125,7 +114,7 @@ static std::vector<float> hilbert_envelope_fir(const std::vector<float>& x) {
     // Convolve x with h -> imag (causal, zero-padded)
     for (int n=0; n<L; ++n) {
         double acc = 0.0;
-        int kmin = std::max(0, n - (L-1)); // always 0 here; kept for clarity
+        int kmin = std::max(0, n - (L-1)); 
         int kmax = std::min(N-1, n);
         (void)kmin;
         for (int k=0; k<=kmax; ++k) {
@@ -144,7 +133,6 @@ static std::vector<float> hilbert_envelope_fir(const std::vector<float>& x) {
     return env;
 }
 
-// ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200]\n";
@@ -154,7 +142,6 @@ int main(int argc, char** argv){
     std::string outpng = argv[2];
     int W = (argc>=4)? std::max(200, std::atoi(argv[3])) : 1200;
 
-    // --- Read WAV (libsndfile) ---
     SndfileHandle snd(inpath);
     if (snd.error()) { std::cerr << "libsndfile error\n"; return 1; }
     int fs = snd.samplerate();
@@ -168,34 +155,28 @@ int main(int argc, char** argv){
     if (ch==1) {
         y = std::move(buf);
     } else {
-        for (sf_count_t i=0;i<N;++i) y[i] = buf[i*ch + 0]; // take channel 0
+        for (sf_count_t i=0;i<N;++i) y[i] = buf[i*ch + 0]; 
     }
-    // normalize
     float maxv = 0.f;
     for (auto v: y) maxv = std::max(maxv, std::abs(v));
     if (maxv>0) for (auto& v: y) v /= maxv;
 
-    // --- Band-limit around the subcarrier (~2.4 kHz) ---
-    // Gentle bandpass + light smoothing (still at original fs)
+
     Biquad bp = Biquad::bandpass(fs, 2400.0, 1.5);
     std::vector<float> yb = y;
     for (auto& s: yb) s = bp.process(s);
     bp.reset();
-    filtfilt(yb, Biquad::lowpass(fs, 4500.0));  // pre-envelope smoothing
+    filtfilt(yb, Biquad::lowpass(fs, 4500.0));  
 
-    // --- Decimate to reduce cost (factor 4: e.g., 48 kHz -> 12 kHz) ---
     const int DEC = 4;
-    filtfilt(yb, Biquad::lowpass(fs, fs/(2.0*DEC) * 0.9)); // anti-alias guard
+    filtfilt(yb, Biquad::lowpass(fs, fs/(2.0*DEC) * 0.9)); 
     std::vector<float> yd = decimate(yb, DEC);
     int fs_d = fs / DEC;
 
-    // --- Envelope via FIR Hilbert (analytic magnitude) ---
     std::vector<float> env = hilbert_envelope_fir(yd);
 
-    // Optional: smooth the envelope a bit
     filtfilt(env, Biquad::lowpass(fs_d, 3000.0));
 
-    // Optional: very light DC-block to remove tiny residual baseline
     {
         float px = 0.f, py = 0.f;
         const float r = 0.995f;
@@ -206,7 +187,6 @@ int main(int argc, char** argv){
         }
     }
 
-    // --- Sync detection (Goertzel on sliding windows, at decimated fs) ---
     const double f1 = 1040.0, f2 = 832.0; // NOAA APT sync tones
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs_d*win_ms/1000);
@@ -226,7 +206,6 @@ int main(int argc, char** argv){
         scores.push_back(p);
         centers.push_back(start + win/2);
     }
-    // Normalize scores
     double minsc=*std::min_element(scores.begin(), scores.end());
     double maxsc=*std::max_element(scores.begin(), scores.end());
     if (maxsc>minsc) {
@@ -235,7 +214,6 @@ int main(int argc, char** argv){
         std::cerr << "Flat scores; sync not found.\n"; return 1;
     }
 
-    // Peak picking with refractory period ~0.4 s
     int minDistHops = int(0.40 * fs_d / hop);
     std::vector<int> peaks;
     double thr = 0.2;
@@ -248,7 +226,6 @@ int main(int argc, char** argv){
             if (argmax==i) { peaks.push_back(centers[i]); last = i; }
         }
     }
-    // Drop too-close peaks (<0.2 s apart)
     std::vector<int> line_starts;
     for (size_t i=0;i<peaks.size();++i){
         if (i==0 || (peaks[i]-peaks[i-1]) > int(0.20*fs_d)) line_starts.push_back(peaks[i]);
@@ -259,7 +236,6 @@ int main(int argc, char** argv){
     }
     std::cerr << "Detected lines: " << line_starts.size() << "\n";
 
-    // --- Assemble image with per-line deskew + robust per-line AGC ---
     std::vector<std::vector<uint8_t>> rows;
     rows.reserve(line_starts.size());
     for (size_t i=0;i+1<line_starts.size();++i){
@@ -277,20 +253,19 @@ int main(int argc, char** argv){
         if (hi <= lo) continue;
         for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
 
-        // Running-median per-row normalization (remove horizontal bands)
         double mean = 0.0;
         for (auto v : segline) mean += v;
         mean /= std::max<size_t>(1, segline.size());
 
         static std::vector<double> recentMeans;
         recentMeans.push_back(mean);
-        size_t Wm = 101; // wider window for smoother gain
+        size_t Wm = 101; 
         if (recentMeans.size() > Wm) recentMeans.erase(recentMeans.begin());
         std::vector<double> sorted = recentMeans;
         std::nth_element(sorted.begin(), sorted.begin() + (int)sorted.size()/2, sorted.end());
         double targetMed = sorted[(int)sorted.size()/2];
         double gainMed = (mean > 1e-6) ? (targetMed / mean) : 1.0;
-        gainMed = std::clamp(gainMed, 0.7, 1.4); // avoid over-correction
+        gainMed = std::clamp(gainMed, 0.7, 1.4); 
         for (auto& v : segline) v = std::clamp(float(v * gainMed), 0.0f, 1.0f);
 
         auto line = resample_line(segline, W);
@@ -304,7 +279,6 @@ int main(int argc, char** argv){
     std::vector<uint8_t> img(H*W);
     for (int r=0;r<H;++r) std::copy(rows[r].begin(), rows[r].end(), img.begin()+r*W);
 
-    // Optional small 3x3 median to de-speckle (comment out if you prefer raw)
     auto med3 = [&](int r, int c){
         uint8_t k[9]; int idx=0;
         for (int dr=-1; dr<=1; ++dr)

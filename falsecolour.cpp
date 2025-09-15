@@ -25,7 +25,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// ------------------ Biquad + helpers ------------------
 struct Biquad {
     double b0=1, b1=0, b2=0, a1=0, a2=0;
     double z1=0, z2=0;
@@ -55,14 +54,12 @@ struct Biquad {
     }
 };
 
-// Zero-phase filter by forward/backward pass
 static void filtfilt(std::vector<float>& x, Biquad biq) {
     for (auto& s : x) s = biq.process(s);
     biq.reset();
     for (int i=(int)x.size()-1; i>=0; --i) x[i] = biq.process(x[i]);
 }
 
-// Goertzel (power at a single frequency)
 static double goertzel_power(const float* x, int N, double fs, double f) {
     int k = int(0.5 + (N * f) / fs);
     double w = (2.0 * M_PI / N) * k;
@@ -76,7 +73,6 @@ static double goertzel_power(const float* x, int N, double fs, double f) {
     return power;
 }
 
-// Linear resample to fixed length
 static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
     std::vector<float> out(W, 0.f);
     if (seg.size() < 2) return out;
@@ -90,7 +86,6 @@ static std::vector<float> resample_line(const std::vector<float>& seg, int W) {
     return out;
 }
 
-// ------------------ Hilbert FFT envelope ------------------
 static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     int N = (int)x.size();
     std::vector<std::complex<double>> X(N);
@@ -133,7 +128,7 @@ static std::vector<float> hilbert_envelope_fft(const std::vector<float>& x) {
     return env;
 }
 
-// --- Multi-level Haar wavelet denoising (for "manual" mode) ---
+// multi-level Haar wavelet denoising (for "manual" mode) 
 static void haar_dwt(std::vector<double>& data, int levels) {
     int n = (int)data.size();
     for (int lev=0; lev<levels; lev++) {
@@ -195,7 +190,7 @@ static std::vector<uint8_t> haar_denoise_multi(const std::vector<uint8_t>& row, 
     return out;
 }
 
-// ---- Colormap name -> OpenCV enum (returns -1 for gray) ----
+// colormap name -> OpenCV enum (returns -1 for gray)
 static int map_colormap(const std::string& name) {
     std::string s = name;
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return (char)std::tolower(c); });
@@ -219,10 +214,9 @@ static int map_colormap(const std::string& name) {
 #else
     if (s=="turbo")    return cv::COLORMAP_JET; // fallback
 #endif
-    return -1; // default to gray if unknown
+    return -1; // default to gray 
 }
 
-// ------------------ Main ------------------
 int main(int argc, char** argv){
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " input.wav out.png [width=1200] [mode] [color]\n";
@@ -236,7 +230,6 @@ int main(int argc, char** argv){
     std::string mode  = (argc>=5)? std::string(argv[4]) : std::string("opencv"); // default
     std::string color = (argc>=6)? std::string(argv[5]) : std::string("gray");   // default
 
-    // --- Read WAV (libsndfile) ---
     SndfileHandle snd(inpath);
     if (snd.error()) { std::cerr << "libsndfile error\n"; return 1; }
     int fs = snd.samplerate();
@@ -250,19 +243,17 @@ int main(int argc, char** argv){
     if (ch==1) y = std::move(buf);
     else for (sf_count_t i=0;i<N;++i) y[i] = buf[i*ch + 0];
 
-    // normalize
     float maxv = 0.f;
     for (auto v: y) maxv = std::max(maxv, std::abs(v));
     if (maxv>0) for (auto& v: y) v /= maxv;
 
-    // --- Band-limit around subcarrier (~2.4 kHz) ---
+    // band-limit around subcarrier (2.4 kHz)
     Biquad bp = Biquad::bandpass(fs, 2400.0, 1.5);
     std::vector<float> yb = y;
     for (auto& s: yb) s = bp.process(s);
     bp.reset();
     filtfilt(yb, Biquad::lowpass(fs, 4500.0));
 
-    // --- High-quality resampling using libsamplerate ---
     const int DEC = 4;
     int fs_d = fs / DEC;
     double ratio = 1.0 / DEC;
@@ -283,11 +274,10 @@ int main(int argc, char** argv){
     }
     yd.resize(src_data.output_frames_gen);
 
-    // --- Envelope with Hilbert FFT ---
+    // envelope with Hilbert FFT
     std::vector<float> env = hilbert_envelope_fft(yd);
     filtfilt(env, Biquad::lowpass(fs_d, 3000.0));
 
-    // --- DC-block ---
     {
         float px = 0.f, py = 0.f;
         const float r = 0.995f;
@@ -298,7 +288,6 @@ int main(int argc, char** argv){
         }
     }
 
-    // --- Sync detection (Goertzel on sliding windows) ---
     const double f1 = 1040.0, f2 = 832.0;
     const int win_ms = 20, hop_ms = 5;
     const int win = std::max(8, fs_d*win_ms/1000);
@@ -339,7 +328,6 @@ int main(int argc, char** argv){
     }
     if (line_starts.size() < 10) { std::cerr << "Too few line starts.\n"; return 1; }
 
-    // --- Assemble image rows with per-line normalization ---
     std::vector<std::vector<uint8_t>> rows;
     rows.reserve(line_starts.size());
     static std::vector<double> recentMeans; // for running-median AGC
@@ -358,7 +346,6 @@ int main(int argc, char** argv){
         if (hi <= lo) continue;
         for (auto& v: segline){ v = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); }
 
-        // running-median per-row normalization
         double mean = 0.0;
         for (auto v : segline) mean += v;
         mean /= std::max<size_t>(1, segline.size());
@@ -382,7 +369,7 @@ int main(int argc, char** argv){
 
     const int H = (int)rows.size();
 
-    // --------- BRANCH: manual vs OpenCV ----------
+    // bRANCH: manual vs OpenCV 
     std::vector<uint8_t> grayBuf; // final grayscale before optional color
     if (mode == "manual") {
         // Haar denoise each row
@@ -393,7 +380,7 @@ int main(int argc, char** argv){
         for (int r=0;r<H;++r)
             std::copy(rows[r].begin(), rows[r].end(), grayBuf.begin()+r*W);
 
-        // Global histogram equalization
+        // global histogram equalisation
         const int levels = 256;
         std::vector<int> hist(levels, 0);
         for (auto v : grayBuf) hist[v]++;
@@ -429,25 +416,23 @@ int main(int argc, char** argv){
         grayBuf.assign(imgDenoised.begin<uint8_t>(), imgDenoised.end<uint8_t>());
     }
 
-    // --------- Optional color mapping with OpenCV ---------
     int cmap = map_colormap(color);
     if (cmap < 0) {
-        // Gray output
         if (!stbi_write_png(outpng.c_str(), W, H, 1, grayBuf.data(), W)) {
             std::cerr << "Failed to write PNG\n"; return 1;
         }
         std::cerr << "Saved " << outpng << " (" << W << "x" << H << ") mode=" << mode << " color=gray\n";
     } else {
         cv::Mat grayMat(H, W, CV_8UC1, grayBuf.data());
-        if (!grayMat.isContinuous()) grayMat = grayMat.clone(); // ensure contiguous
+        if (!grayMat.isContinuous()) grayMat = grayMat.clone(); 
 
         cv::Mat bgr;
-        cv::applyColorMap(grayMat, bgr, cmap);         // BGR, CV_8UC3
+        cv::applyColorMap(grayMat, bgr, cmap);         
         if (!bgr.data) { std::cerr << "applyColorMap produced empty image\n"; return 1; }
 
         cv::Mat rgb;
-        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);     // RGB for stbi
-        if (!rgb.isContinuous()) rgb = rgb.clone();    // ensure contiguous
+        cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);     
+        if (!rgb.isContinuous()) rgb = rgb.clone();   
 
         // Use Mat's stride (bytes per row). stb expects row stride in bytes.
         int stride = static_cast<int>(rgb.step);

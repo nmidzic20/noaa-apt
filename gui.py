@@ -1,17 +1,19 @@
-# gui.py
-import os
+import os, sys
 import threading
 import subprocess
 from typing import Callable, Dict, List, Optional, Tuple
 
-# ---------- CONFIG ----------
-BUILD_DIR = r".\build\Release"
+def _resource_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+BUILD_DIR = _resource_dir()  # decoders will be placed right here beside the app
+# BUILD_DIR = r".\build\Release"
 OUTPUT_FILENAME = "out.png"
 
-# Decoder -> executable file name (without path)
 DECODERS: List[Tuple[str, str]] = [
     ("abs_val",        "abs_val.exe"),
-    ("cosine",         "cosine.exe"),
     ("hilbertFIR",     "hilbertFIR.exe"),
     ("hilbertFFT",     "hilbertFFT.exe"),
     ("contrast",       "contrast.exe"),
@@ -89,14 +91,11 @@ class DecoderCore:
         exe_path = self.resolve_exe_path(decoder_key)
         out_png = self.build_output_path(output_dir)
 
-        # base: exe wav out width
         cmd = [exe_path, wav_path, out_png, width]
 
-        # Pseudocolour variants: require mode="manual" and color="pseudo"
         if decoder_key in ("pseudocolour1", "pseudocolour2"):
             cmd.extend([mode or "manual", color or "pseudo"])
 
-        # falsecolour: mode in {manual,pseudo}, color in whitelist
         elif decoder_key == "falsecolour":
             m = mode or self.falsecolour_modes[0]
             c = color or self.falsecolour_colors[0]
@@ -137,7 +136,6 @@ class DecoderCore:
                         try:
                             on_stdout(line.rstrip("\n"))
                         except Exception:
-                            # Don't let UI callback errors kill the process
                             pass
                     rc = p.wait()
                     on_stdout(f"\nProcess exited with code {rc}")
