@@ -2,6 +2,8 @@
 
 It is enough to download `dist` directory which includes test signals. Double-click `gui.exe` to run the application, input a signal audio file and select a decoder.
 
+# All commands (development & testing)
+
 // pyinstaller - from project folder (windows)
 
 // for multiple C++ files (7 decoders)
